@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import pickle
 import numpy as np
+from sklearn.preprocessing import LabelEncoder, StandardScaler # Added for clarity, though technically only needed if re-fitting
 
 # --- 1. CONFIGURATION AND ASSET LOADING ---
 
@@ -9,7 +10,7 @@ import numpy as np
 @st.cache_resource
 def load_assets():
     try:
-        # Adjust file paths if they are in a different directory (e.g., 'model_assets/best_model.pkl')
+        # Load your assets. 'encoder' is a dictionary of LabelEncoders.
         model = pickle.load(open('best_model.pkl', 'rb'))
         encoder = pickle.load(open('encoder.pkl', 'rb'))
         scaler = pickle.load(open('scaler.pkl', 'rb'))
@@ -20,7 +21,7 @@ def load_assets():
 
 model, encoder, scaler = load_assets()
 
-# --- 2. STREAMLIT UI LAYOUT ---
+# --- 2. STREAMLIT UI LAYOUT (No changes needed here) ---
 
 st.set_page_config(layout="wide", page_title="Customer Churn Prediction")
 st.title("Customer Churn Prediction 📊")
@@ -38,7 +39,7 @@ user_input = {}
 with col1:
     st.header("Customer Information")
     user_input['gender'] = st.selectbox("Gender", ["Male", "Female"], index=0)
-    # Note: The model expects 'SeniorCitizen' as 0 or 1, but the UI shows 'No'/'Yes'
+    # Note: The model expects 'SeniorCitizen' as 0 or 1. We handle the UI mapping here.
     senior_citizen_map = {"No": 0, "Yes": 1}
     senior_citizen_ui = st.selectbox("Senior Citizen", ["No", "Yes"], index=0)
     user_input['SeniorCitizen'] = senior_citizen_map[senior_citizen_ui]
@@ -78,61 +79,43 @@ with col3:
     )
 
     # Numerical inputs for charges
-    # You might want to set realistic min/max values based on your training data
     user_input['MonthlyCharges'] = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=200.0, value=50.0, step=0.01)
     user_input['TotalCharges'] = st.number_input("Total Charges ($)", min_value=0.0, max_value=10000.0, value=600.0, step=0.01)
 
-# --- 3. PREDICTION LOGIC ---
+# --- 3. PREDICTION LOGIC (Corrected) ---
 
-# The full list of features in the order your model expects (must match training feature names!)
-# Adjust this list if your model was trained with a different order or set of columns.
-FEATURE_COLUMNS = [
-    'tenure', 'MonthlyCharges', 'TotalCharges', 'SeniorCitizen', 'gender_Male', 'gender_Female', 
-    'Partner_Yes', 'Partner_No', 'Dependents_Yes', 'Dependents_No', 'PhoneService_Yes', 'PhoneService_No', 
-    'MultipleLines_Yes', 'MultipleLines_No', 'MultipleLines_No phone service', 'InternetService_DSL', 
-    'InternetService_Fiber optic', 'InternetService_No', 'OnlineSecurity_Yes', 'OnlineSecurity_No', 
-    'OnlineSecurity_No internet service', 'OnlineBackup_Yes', 'OnlineBackup_No', 'OnlineBackup_No internet service', 
-    'DeviceProtection_Yes', 'DeviceProtection_No', 'DeviceProtection_No internet service', 'TechSupport_Yes', 
-    'TechSupport_No', 'TechSupport_No internet service', 'StreamingTV_Yes', 'StreamingTV_No', 
-    'StreamingTV_No internet service', 'StreamingMovies_Yes', 'StreamingMovies_No', 
-    'StreamingMovies_No internet service', 'Contract_Month-to-month', 'Contract_One year', 'Contract_Two year', 
-    'PaperlessBilling_Yes', 'PaperlessBilling_No', 'PaymentMethod_Electronic check', 'PaymentMethod_Mailed check', 
-    'PaymentMethod_Bank transfer (automatic)', 'PaymentMethod_Credit card (automatic)'
+# The final list of features in the order your model expects (from notebook output)
+FINAL_COLUMNS_ORDER = [
+    'gender', 'SeniorCitizen', 'Partner', 'Dependents', 'tenure',
+    'PhoneService', 'MultipleLines', 'InternetService', 'OnlineSecurity',
+    'OnlineBackup', 'DeviceProtection', 'TechSupport', 'StreamingTV',
+    'StreamingMovies', 'Contract', 'PaperlessBilling', 'PaymentMethod',
+    'MonthlyCharges', 'TotalCharges'
 ]
 
+NUMERICAL_COLS = ['tenure', 'MonthlyCharges', 'TotalCharges']
 
-def preprocess_and_predict(input_data, model, encoder, scaler, feature_columns):
+def preprocess_and_predict(input_data, model, encoders, scaler):
     # Convert input dictionary to DataFrame
     df = pd.DataFrame([input_data])
     
-    # 1. Separate Numerical and Categorical columns
-    numerical_cols = ['tenure', 'MonthlyCharges', 'TotalCharges']
-    categorical_cols = df.drop(columns=numerical_cols + ['SeniorCitizen']).columns.tolist()
+    # 1. Apply Label Encoding to categorical columns
+    # The 'encoders' object is a dictionary of fitted LabelEncoder objects.
+    for col, le in encoders.items():
+        # LabelEncoder expects a 1D array/Series, so we apply it directly.
+        # It's critical to only transform the columns that were originally fitted.
+        if col in df.columns:
+            df[col] = le.transform(df[col]) 
     
-    # 2. Scale Numerical features
-    df[numerical_cols] = scaler.transform(df[numerical_cols])
+    # 2. Apply Scaling to numerical features
+    # StandardScaler expects numerical columns.
+    df[NUMERICAL_COLS] = scaler.transform(df[NUMERICAL_COLS])
     
-    # 3. Encode Categorical features
-    # Use the loaded encoder to transform the categorical columns
-    encoded_features = encoder.transform(df[categorical_cols])
-    
-    # Get feature names from the encoder (assuming it's a OneHotEncoder)
-    encoded_feature_names = encoder.get_feature_names_out(categorical_cols)
-    encoded_df = pd.DataFrame(encoded_features, columns=encoded_feature_names)
-    
-    # 4. Combine all features
-    # Use the pre-defined feature order (FEATURE_COLUMNS)
-    final_df = pd.concat([df[numerical_cols + ['SeniorCitizen']].reset_index(drop=True), encoded_df], axis=1)
-    
-    # Align columns, adding missing OHE columns with 0 (essential for deployment!)
-    missing_cols = set(feature_columns) - set(final_df.columns)
-    for c in missing_cols:
-        final_df[c] = 0
-    
+    # 3. Final Features Preparation
     # Select and order the features exactly as expected by the model
-    final_features = final_df[feature_columns].values
+    final_features = df[FINAL_COLUMNS_ORDER].values
     
-    # 5. Make Prediction
+    # 4. Make Prediction
     prediction = model.predict(final_features)
     # Get the probability for the positive class (churn = 1)
     probability = model.predict_proba(final_features)[:, 1]
@@ -149,7 +132,8 @@ if st.button("Predict Churn", type="primary"):
         st.warning("⚠️ Warning: Total Charges are usually greater than Monthly Charges times Tenure. Please check the input.")
     
     try:
-        churn_class, churn_proba = preprocess_and_predict(user_input, model, encoder, scaler, FEATURE_COLUMNS)
+        # Pass the loaded 'encoder' dictionary to the function
+        churn_class, churn_proba = preprocess_and_predict(user_input, model, encoder, scaler)
         
         st.subheader("Prediction Result")
 
@@ -163,4 +147,5 @@ if st.button("Predict Churn", type="primary"):
         st.balloons()
         
     except Exception as e:
+        # Now st.exception will provide a useful traceback
         st.exception(f"An error occurred during prediction. Check the data preprocessing steps: {e}")
